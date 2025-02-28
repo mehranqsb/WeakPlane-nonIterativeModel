@@ -1,0 +1,133 @@
+@DSL DefaultDSL;
+@Behaviour WeakPlaneModel_nonIter;
+@Author Mehran Ghasabeh;
+@Date 1 / 10 / 2024;
+@Description
+{
+  An implicit implementation of a ubiquitous joint model.
+}
+
+@ModellingHypotheses{".+"};
+// @RequireStiffnessTensor<UnAltered>;
+
+@MaterialProperty real young;
+young.setEntryName("Em");
+@MaterialProperty real nu;
+nu.setEntryName("nu");
+// weakness plane cohesion
+@MaterialProperty real c_wp;
+c_wp.setEntryName("PlaneCohesion");
+// weakness plane friction angle
+@MaterialProperty real phi_wp;
+phi_wp.setEntryName("PlaneFrictionAngle");
+// weakness plane dilatancy angle
+@MaterialProperty real psi_wp;
+psi_wp.setEntryName("PlaneDilatancyAngle");
+
+@StateVariable StrainStensor deps;
+deps.setEntryName("ElastiStrainIncrement");
+@StateVariable StrainStensor eel;
+eel.setGlossaryName("ElasticStrain");
+@StateVariable strain p;
+p.setEntryName("EquivalentPlasticStrainWP");
+@AuxiliaryStateVariable strain p_prev;
+p_prev.setGlossaryName("EquivalentPlasticStrain");
+
+@Parameter local_zero_tolerance = 1.e-14;
+@Parameter pi = 3.141592653589793;
+
+@LocalVariable real tan_phi_wp;
+@LocalVariable real tan_psi_wp;
+@LocalVariable StressStensor sig0;
+
+@PredictionOperator
+{
+  const auto lambda = computeLambda(young, nu);
+  const auto mu = computeMu(young, nu);
+  Dt = lambda * Stensor4::IxI() + 2 * mu * Stensor4::Id();
+}
+
+@ProvidesSymmetricTangentOperator;
+
+@InitLocalVariables
+{
+  tan_phi_wp = std::tan(phi_wp * pi / 180.);
+  tan_psi_wp = std::tan(psi_wp * pi / 180.);
+}
+
+@Integrator
+{
+  sig0 = sig;
+  const auto id = Stensor::Id();
+  const auto id4 = Stensor4::Id();
+  const auto lambda = computeLambda(young, nu);
+  const auto mu = computeMu(young, nu);
+  // elastic loading
+  eel += deto;
+  deps = deto;
+  if (computeTangentOperator_)
+  {
+    Dt = lambda * Stensor4::IxI() + 2 * mu * id4;
+  }
+  const auto Dt_el = lambda * Stensor4::IxI() + 2 * mu * id4;
+  // trial equivalent stress
+  const auto sig_el =  sig0 + Dt_el * deps;
+  const double t_s_el =
+      (eel.size() == 6)
+          ? sqrt((sig_el[3] * sig_el[3] + sig_el[4] * sig_el[4]) / 2)
+          : sqrt((sig_el[3] * sig_el[3]) / 2);
+
+  const auto plastic_loading =
+      t_s_el - c_wp + sig_el[0] * tan_phi_wp > stress{0};
+  // plastic loading
+  if (plastic_loading)
+  {
+    const double t_s = (eel.size() == 6)
+                           ? sqrt((sig[3] * sig[3] + sig[4] * sig[4]) / 2)
+                           : sqrt((sig[3] * sig[3]) / 2);
+    // Initialize the first 3 elements to 1 and the rest to 0
+    auto n = id;
+    n *= 0.;
+    n[0] = tan_psi_wp;
+
+    auto nF = id;
+    nF *= 0.;
+    // std::cout << "PEEQ " << nF  << std::endl;
+    nF[0] = tan_phi_wp;
+
+    auto dn_dsig = id4;
+    dn_dsig *= 0;
+
+    if (t_s > local_zero_tolerance)
+    {
+      n[3] = nF[3] = sig[3] / (t_s * 2.);
+      const double t_s_cube_over_four = t_s * t_s * t_s * 4.;      
+      if (eel.size() == 6)
+      {
+        n[4] = nF[4] = sig[4] / (t_s * 2);
+        dn_dsig(4, 4) =
+            1. / (t_s * 2.) - sig[4] * sig[4] / t_s_cube_over_four;
+        dn_dsig(3, 4) = -sig[3] * sig[4] / t_s_cube_over_four;        
+      }
+    }
+    dp = ((nF | Dt_el) | deto) / (((nF | Dt_el) | n));
+    dp = std::max(dp, 0.0);
+    const auto fac = (lambda + 2. * mu);
+    const auto dpddeto = (nF | Dt_el) / (((nF | Dt_el) | n));
+    const auto Dt_p = ((n ^ dpddeto) + dp * dn_dsig) * fac * fac;
+    //const auto Dt_p = (n | Dt_el) ^ (nF | Dt_el) / (((nF | Dt_el) | n));
+    eel -= dp * n;
+    deps-= dp * n;
+    if ((computeTangentOperator_) && (smt == CONSISTENTTANGENTOPERATOR))
+    {
+      Dt -= Dt_p;
+    }
+  }
+  // stress update
+  sig = sig0 + Dt_el * deps;
+  //sig = sig0 + lambda * trace(deps) * Stensor::Id() + 2 * mu * deps;
+}
+@UpdateAuxiliaryStateVariables
+{
+  p_prev = std::max(p, 0.0) - dp;
+}
