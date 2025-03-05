@@ -1,0 +1,166 @@
+/**
+ * \file
+ * \copyright
+ * Copyright (c) 2012-2024, OpenGeoSys Community (http://www.opengeosys.org)
+ *            Distributed under a Modified BSD License.
+ *              See accompanying file LICENSE.txt or
+ *              http://www.opengeosys.org/project/license
+ */
+
+@DSL Implicit;
+@Behaviour UbiquitousJointModel;
+@Author Thomas Nagel;
+@Date 21 / 03 / 2020;
+@Description{
+    Ubiquitous joint model where the matrix fails according to a Mohr -
+        Coulomb criterion(with tension - cutoff) and
+    the embedded weakness planes follow a Coulomb behaviour(
+        so far without tension cut - off)
+            .Both models are non -
+        associated.The fracture normal is the x -
+        direction(1, 0, 0).Any rotations to be done by the FE programme.};
+
+@Algorithm NewtonRaphson;
+@MaximumNumberOfIterations 500;
+
+@Brick StandardElasticity;
+
+@Epsilon 1.e-14;
+@Theta 1.0;
+@Parameter local_zero_tolerance = 1.e-14;
+@Parameter pi = 3.141592653589793;
+
+@ModellingHypotheses{".+"};
+@RequireStiffnessTensor<UnAltered>;
+
+// weakness plane cohesion
+@MaterialProperty real c_wp;
+c_wp.setEntryName("PlaneCohesion");
+// weakness plane friction angle
+@MaterialProperty real phi_wp;
+phi_wp.setEntryName("PlaneFrictionAngle");
+// weakness plane dilatancy angle
+@MaterialProperty real psi_wp;
+psi_wp.setEntryName("PlaneDilatancyAngle");
+@MaterialProperty real visc;
+visc.setEntryName("Viscosity");
+
+// Not array because of OGS output
+@StateVariable strain lamWP;
+lamWP.setEntryName("EquivalentPlasticStrainWP");
+@PhysicalBounds lamWP in [0:*[;
+// add an auxialary state variable storing
+// Equivalent Plastic Strain from the previous time step
+@AuxiliaryStateVariable real lam_prev;
+lam_prev.setGlossaryName("EquivalentPlasticStrain");
+@PhysicalBounds lam_prev in [0:*[;
+
+@LocalVariable bool F;
+@LocalVariable real tan_phi_wp;
+@LocalVariable real tan_psi_wp;
+
+@InitLocalVariables
+{
+    constexpr auto sqrt2 = math::Cste<real>::sqrt2;
+    // tan_phi_wp after conversion to rad
+    tan_phi_wp = tan(phi_wp * pi / 180.);
+    // tan_psi_wp after conversion to rad
+    tan_psi_wp = tan(psi_wp * pi / 180.);
+
+    // Compute initial elastic strain
+    const auto S = invert(D);
+    eel = S * sig;
+
+    const auto sig_el = computeElasticPrediction();
+    // Maximum shear stress
+    const double t_s_el =
+        (sig_el.size() == 6)
+            ? sqrt((sig_el[3] / sqrt2 * sig_el[3] + sig_el[4] * sig_el[4]) / 2.)
+            : sqrt((sig_el[3] * sig_el[3]) / 2);
+
+    // weak plane Coulomb
+    F = t_s_el - c_wp + sig_el[0] * tan_phi_wp > 0.;
+}
+
+@Integrator
+{
+    if (F)
+    {
+        const auto id = Stensor::Id();
+        const auto id4 = Stensor4::Id();
+        const auto Pdev = Stensor4::K();
+        const double t_s = (sig.size() == 6)
+                               ? sqrt((sig[3] * sig[3] + sig[4] * sig[4]) / 2)
+                               : sqrt((sig[3] * sig[3]) / 2);
+        // yield function value
+        const auto Fy = t_s - c_wp + sig[0] * tan_phi_wp;
+
+        // flow direction and yield function gradient
+        auto n = id;
+        n *= 0.;
+        n[0] = tan_psi_wp;  // x
+
+        auto nF = id;
+        nF *= 0.;
+        nF[0] = tan_phi_wp;  // x
+
+        auto dn_dsig = id4;
+        dn_dsig *= 0.;
+
+        if (t_s > local_zero_tolerance)
+        {
+            n[3] = nF[3] = sig[3] / (t_s * 2.);  // xy
+            const double t_s_cube_over_four = t_s * t_s * t_s * 4.;
+            dn_dsig(3, 3) =
+                1. / (t_s * 2.) - sig[3] * sig[3] / t_s_cube_over_four;
+            if (sig.size() == 6)
+            {
+                n[4] = nF[4] = sig[4] / (t_s * 2);  // xz
+                dn_dsig(4, 4) =
+                    1. / (t_s * 2.) - sig[4] * sig[4] / t_s_cube_over_four;
+                dn_dsig(3, 4) = -sig[3] * sig[4] / t_s_cube_over_four;
+            }
+        }
+
+        // residuals
+        feel += dlamWP * n;
+        flamWP = Fy / D(0, 0) - visc * dlamWP;
+        // Jacobian
+        dfeel_ddeel += theta * dlamWP * (dn_dsig * D);
+        dfeel_ddlamWP = n;
+        dflamWP_ddlamWP = -visc + strain(0.);
+        dflamWP_ddeel = theta * (nF | D) / D(0, 0);
+    }
+}
+@UpdateAuxiliaryStateVariables
+{
+    lam_prev = lamWP - dlamWP;
+}
+@AdditionalConvergenceChecks
+{
+    if (converged)
+    {
+        if (F)
+        {
+            if (dlamWP < 0)
+            {
+                // deactivating weak plane
+                converged = F = false;
+            }
+        }
+        else
+        {
+            const double t_s =
+                (sig.size() == 6)
+                    ? sqrt((sig[3] * sig[3] + sig[4] * sig[4]) / 2)
+                    : sqrt((sig[3] * sig[3]) / 2);
+            // yield function value
+            const auto Fy = t_s - c_wp + sig[0] * tan_phi_wp;
+            if (Fy > 0)
+            {
+                converged = false;
+                F = true;
+            }
+        }
+    }
+}

@@ -1,0 +1,119 @@
+/**
+ * \file
+ * \copyright
+ * Copyright (c) 2012-2024, OpenGeoSys Community (http://www.opengeosys.org)
+ *            Distributed under a Modified BSD License.
+ *              See accompanying file LICENSE.txt or
+ *              http://www.opengeosys.org/project/license
+ */
+
+@DSL DefaultDSL;
+@Behaviour UbiquitousJointModel_nonIter;
+@Author Mehran Ghasabe, Thomas Nagel;
+@Date 05 / 03 / 2025;
+@Description{Non-Iterative Ubiquitous Joint Model};
+
+@Parameter local_zero_tolerance = 1.e-14;
+@Parameter pi = 3.141592653589793;
+
+@MaterialProperty real young;
+young.setEntryName("Em");
+@MaterialProperty real nu;
+nu.setEntryName("nu");
+@MaterialProperty real c_wp;
+c_wp.setEntryName("PlaneCohesion");
+@MaterialProperty real phi_wp;
+phi_wp.setEntryName("PlaneFrictionAngle");
+@MaterialProperty real psi_wp;
+psi_wp.setEntryName("PlaneDilatancyAngle");
+
+@StateVariable StrainStensor eel;
+eel.setGlossaryName("ElasticStrain");
+@StateVariable strain lamWP;
+lamWP.setEntryName("EquivalentPlasticStrainWP");
+@PhysicalBounds lamWP in [0:*[;
+@AuxiliaryStateVariable real lam_prev;
+lam_prev.setGlossaryName("EquivalentPlasticStrain");
+@PhysicalBounds lam_prev in [0:*[;
+
+@LocalVariable bool F;
+@LocalVariable real tan_phi_wp;
+@LocalVariable real tan_psi_wp;
+@LocalVariable StressStensor sig0;
+
+@PredictionOperator {
+  const auto lambda = computeLambda(young, nu);
+  const auto mu = computeMu(young, nu);
+  Dt = lambda * Stensor4::IxI() + 2 * mu * Stensor4::Id();
+}
+
+@ProvidesSymmetricTangentOperator;
+@InitLocalVariables
+{
+  sig0 = sig;
+  // tan_phi_wp after conversion to rad
+  tan_phi_wp = tan(phi_wp * pi / 180.);
+  // tan_psi_wp after conversion to rad
+  tan_psi_wp = tan(psi_wp * pi / 180.);
+}
+
+@Integrator
+{
+  const auto lambda = computeLambda(young, nu);
+  const auto mu = computeMu(young, nu);
+  // elastic loading
+  eel += deto;
+  if (computeTangentOperator_) {
+    Dt = lambda * Stensor4::IxI() + 2 * mu * Stensor4::Id();
+  }
+  const auto sig_el =
+      sig0 + lambda * trace(deto) * Stensor::Id() + 2 * mu * deto;
+  // Maximum shear stress
+  const double t_s_el = (eel.size() == 6)
+                            ? sqrt((sig_el[3] / std::sqrt(2.) * sig_el[3] +
+                                    sig_el[4] * sig_el[4]) /
+                                   2.)
+                            : sqrt((sig_el[3] * sig_el[3]) / 2);
+  // weak plane Coulomb
+  F = t_s_el - c_wp + sig_el[0] * tan_phi_wp > 0.;
+  if (F) {
+    const auto id = Stensor::Id();
+    const auto id4 = Stensor4::Id();
+    const auto Pdev = Stensor4::K();
+    const double t_s = (sig.size() == 6)
+                           ? sqrt((sig[3] * sig[3] + sig[4] * sig[4]) / 2)
+                           : sqrt((sig[3] * sig[3]) / 2);
+    // yield function value
+    const auto Fy = t_s - c_wp + sig[0] * tan_phi_wp;
+
+    // flow direction and yield function gradient
+    auto n = id;
+    n *= 0.;
+    n[0] = tan_psi_wp; // x
+
+    auto nF = id;
+    nF *= 0.;
+    nF[0] = tan_phi_wp; // x
+
+    auto dn_dsig = id4;
+    dn_dsig *= 0.;
+
+    if (t_s > local_zero_tolerance) {
+      n[3] = nF[3] = sig[3] / (t_s * 2.); // xy
+      const double t_s_cube_over_four = t_s * t_s * t_s * 4.;
+    }
+    dlamWP = (nF | (Dt * deto)) / (((nF * Dt) | n));
+    // dlamWP = ((nF * Dt) | deto) / (((nF * Dt) | n));
+    eel -= dlamWP * n;
+    const auto Dt_p = (n * Dt) ^ (nF * Dt) / (((nF | Dt) | n));
+    if ((computeTangentOperator_) && (smt == CONSISTENTTANGENTOPERATOR)) {
+      Dt -= Dt_p;
+    }
+  }
+  // sig = lambda * trace(eel) * Stensor::Id() + 2 * mu * eel;
+  sig = sig0 + Dt * deto;
+}
+@UpdateAuxiliaryStateVariables
+{
+  lam_prev = lamWP - dlamWP;
+}

@@ -1,0 +1,37 @@
+@Author Mehran Ghasabeh, Thomas Nagel;
+@Date   19/02/2019;
+@Description{
+};
+
+@Real 'Pi' 3.14159265359;
+@Real 'em'  '2e-3 * Pi';
+@Real 'tmax' 1.;
+@Real 'sigp' '-3e2';
+@Real 'Em' '150e3';
+@Real 'nu' '0.275';
+@Real 'PCohesion' '0.';
+@Real 'PFrictionAngle' '22.';
+@Real 'PDilatancyAngle' '0.';
+@Real 'Visc' '0.';
+
+@MaximumNumberOfSubSteps 1;
+@Behaviour<generic> 'src/libBehaviour.so' 'UbiquitousJointModel';
+
+@ImposedStrain 'EXY' {0 : 0, 0.25 : 'em', 0.5 : '-em', 0.75 : 'em', 'tmax' : 0.0};
+// @ImposedStrain<function> 'EXY' 'em * sin(2.* Pi * t)';
+@ImposedStress 'SXX' 'sigp';
+@ImposedStress 'SYY' 'sigp';
+@ImposedStress 'SZZ' 'sigp';
+
+@ExternalStateVariable "Temperature" 293.15;
+
+@MaterialProperty<constant> 'YoungModulus'        'Em';
+@MaterialProperty<constant> 'PoissonRatio'        'nu';
+@MaterialProperty<constant> 'PlaneCohesion'       'PCohesion';
+@MaterialProperty<constant> 'PlaneFrictionAngle'  'PFrictionAngle';
+@MaterialProperty<constant> 'PlaneDilatancyAngle' 'PDilatancyAngle';
+@MaterialProperty<constant> 'Viscosity'           'Visc';
+
+
+@Times{0, 'tmax' in 80};
+
